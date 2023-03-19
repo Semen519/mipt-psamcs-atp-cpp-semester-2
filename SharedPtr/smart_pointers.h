@@ -1,11 +1,6 @@
 #ifndef SHAREDPTR__SMART_POINTERS_H_
 #define SHAREDPTR__SMART_POINTERS_H_
 
-#include <memory>
-#include <cassert>
-
-namespace My {
-
 template<typename U, typename V>
 using base_or_derived_t = std::enable_if_t<
     std::is_base_of_v<U, V> || std::is_same_v<U, V>>;
@@ -77,6 +72,11 @@ struct ControlBlockMakeShared : BaseControlBlock {
       alloc(alloc),
       obj(std::move(obj)) {}
 
+  ControlBlockMakeShared(size_t sc, size_t wc,
+                         const Allocator &alloc) :
+      BaseControlBlock(sc, wc),
+      alloc(alloc) {}
+
   T *get_ptr() { return &obj; }
 
   void dispose() noexcept override {
@@ -104,7 +104,12 @@ class SharedPtr {
         typename std::allocator_traits<Allocator>::template rebind_alloc<
             ControlBlockDirect<T, Allocator, Deleter>>(alloc);
     auto ptr = cb_alloc.allocate(1);
-    cb_alloc.construct(ptr, 1, 0, arg_ptr, alloc, del);
+//    cb_alloc.construct(ptr, 1, 0, arg_ptr, alloc, del);
+    new(ptr) ControlBlockDirect<T, Allocator, Deleter>(1,
+                                                       0,
+                                                       arg_ptr,
+                                                       alloc,
+                                                       del);
     return ptr;
   }
 
@@ -117,7 +122,6 @@ class SharedPtr {
   SharedPtr(Y *ptr, const Deleter &del, const Allocator &alloc) :
       cb_(allocate_direct(ptr, alloc, del)),
       ptr_(ptr) {
-//    std::cout << "1\n";
   }
 
   template<typename Y>
@@ -129,53 +133,48 @@ class SharedPtr {
       SharedPtr(ptr, del, std::allocator<T>()) {}
 
   SharedPtr(const SharedPtr &other) : cb_(other.cb_), ptr_(other.ptr_) {
-    ++(cb_->shared_count);
-//    std::cout << "2\n";
+    if (cb_) {
+      ++(cb_->shared_count);
+    }
   }
 
   template<typename Y, typename = base_or_derived_t<T, Y>>
   SharedPtr(const SharedPtr<Y> &other): cb_(other.cb_), ptr_(other.ptr_) {
     ++(cb_->shared_count);
-//    std::cout << "3\n";
   }
 
   template<typename Y, typename = base_or_derived_t<T, Y>>
   SharedPtr(SharedPtr<Y> &&other): cb_(other.cb_), ptr_(other.ptr_) {
     other.cb_ = nullptr;
     other.ptr_ = nullptr;
-//    std::cout << "4\n";
   }
-
-//  SharedPtr &operator=(const SharedPtr &other) = delete;
 
   template<typename Y, typename = base_or_derived_t<T, Y>>
   SharedPtr &operator=(SharedPtr<Y> &other) {
-    auto tmp_ptr = other;
+    auto tmp_ptr = SharedPtr<T>(other);
     swap(tmp_ptr);
     return *this;
   }
 
   template<typename Y>
   SharedPtr &operator=(SharedPtr<Y> &&other) {
-    auto tmp = std::move(other);
-    swap(tmp);
+    SharedPtr<T>(std::move(other)).swap(*this);
     return *this;
   }
 
  private:
   template<typename Y, typename Allocator, typename... Args>
-  friend auto allocate_shared(const Allocator &alloc, Args &&... args);
+  friend auto allocateShared(const Allocator &alloc, Args &&... args);
 
   template<typename Y, typename... Args>
-  friend SharedPtr<Y> make_shared(Args &&... args);
+  friend SharedPtr<Y> makeShared(Args &&... args);
 
   template<typename Allocator>
   SharedPtr(ControlBlockMakeShared<T, Allocator> *cb) :
       cb_(cb),
       ptr_(cb->get_ptr()) {}
 
-  template<typename Y, base_or_derived_t<T, Y>>
-  SharedPtr(WeakPtr<Y> &weak_ptr) :
+  SharedPtr(const WeakPtr<T> &weak_ptr) :
       cb_(weak_ptr.cb_),
       ptr_(weak_ptr.ptr_) {
     ++(cb_->shared_count);
@@ -183,7 +182,6 @@ class SharedPtr {
 
  public:
   ~SharedPtr() {
-//    std::cout << "shared_ptr destructor called\n";
     if (cb_) {
       cb_->shared_release();
     }
@@ -203,11 +201,14 @@ class SharedPtr {
 
   void reset() noexcept { SharedPtr().swap(*this); }
 
-  T &operator*() { return *ptr_; }
+  T &operator*() noexcept { return *ptr_; }
+  T &operator*() const noexcept { return *ptr_; }
 
-  T *operator->() { return ptr_; }
+  T *operator->() noexcept { return ptr_; }
+  T *operator->() const noexcept { return ptr_; }
 
-  T *get() { return ptr_; }
+  T *get() noexcept { return ptr_; }
+  T *get() const noexcept { return ptr_; }
 
  private:
   BaseControlBlock *cb_{nullptr};
@@ -223,25 +224,29 @@ class SharedPtr {
 };
 
 template<typename T, typename Allocator, typename... Args>
-auto allocate_shared(const Allocator &alloc, Args &&... args) {
+auto allocateShared(const Allocator &alloc, Args &&... args) {
   auto cb_alloc =
       typename std::allocator_traits<Allocator>::template rebind_alloc<
           ControlBlockMakeShared<T, Allocator>>(
           alloc);
   auto ptr = cb_alloc.allocate(1);
   cb_alloc.construct(ptr, 1, 0, alloc, std::forward<Args>(args)...);
-  return ptr;
+  return SharedPtr<T>(ptr);
 }
 
 template<typename T, typename... Args>
-SharedPtr<T> make_shared(Args &&... args) {
-  return My::allocate_shared<T>(std::allocator<T>(),
-                                std::forward<Args>(args)...);
+SharedPtr<T> makeShared(Args &&... args) {
+  return allocateShared<T>(std::allocator<T>(),
+                           std::forward<Args>(args)...);
 }
 
 template<typename T>
 class WeakPtr {
  public:
+  WeakPtr() :
+      cb_(nullptr),
+      ptr_(nullptr) {}
+
   template<typename U, typename = base_or_derived_t<T, U>>
   WeakPtr(SharedPtr<U> &shared_ptr):
       cb_(shared_ptr.cb_),
@@ -266,15 +271,20 @@ class WeakPtr {
 
   template<typename U, typename = base_or_derived_t<T, U>>
   WeakPtr &operator=(WeakPtr<U> &other) {
-    auto tmp_ptr = other;
+    auto tmp_ptr = WeakPtr<T>(other);
     swap(tmp_ptr);
     return *this;
   }
 
   template<typename U, typename = base_or_derived_t<T, U>>
   WeakPtr &operator=(WeakPtr<U> &&other) {
-    auto tmp_ptr = std::move(other);
-    swap(tmp_ptr);
+    WeakPtr<T>(std::move(other)).swap(*this);
+    return *this;
+  }
+
+  template<typename U, typename = base_or_derived_t<T, U>>
+  WeakPtr &operator=(SharedPtr<U> &shared_ptr) {
+    WeakPtr<T>(shared_ptr).swap(*this);
     return *this;
   }
 
@@ -285,7 +295,7 @@ class WeakPtr {
   }
 
  public:
-  template<typename U, base_or_derived_t<T, U>>
+  template<typename U, typename = base_or_derived_t<T, U>>
   void swap(WeakPtr<U> &other) {
     std::swap(cb_, other.cb_);
     std::swap(ptr_, other.ptr_);
@@ -296,6 +306,8 @@ class WeakPtr {
   SharedPtr<T> lock() const noexcept {
     return expired() ? SharedPtr<T>() : SharedPtr<T>(*this);
   }
+
+  size_t use_count() const noexcept { return cb_->shared_count; }
 
  private:
   BaseControlBlock *cb_{nullptr};
@@ -310,5 +322,4 @@ class WeakPtr {
   class SharedPtr;
 };
 
-} // My namespace
 #endif //SHAREDPTR__SMART_POINTERS_H_
