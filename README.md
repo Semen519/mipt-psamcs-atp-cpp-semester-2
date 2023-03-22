@@ -1,2 +1,2 @@
 # mipt-psamcs-atp-cpp-semester-2
-2st semester projects
+2nd semester projects
